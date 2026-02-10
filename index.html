@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocuVoice - Statik Metin Okuyucu</title>
+    
+    <!-- Tailwind CSS (UI için) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Font Awesome (İkonlar için) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- PDF.js (PDF okuma için) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        // PDF.js Worker Ayarı (Zorunlu)
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
+
+    <!-- Mammoth.js (Word/Docx okuma için) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+
+    <style>
+        /* Özel Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        /* Range Slider Özelleştirme */
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            margin-top: -4px;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen font-sans selection:bg-blue-100 selection:text-blue-700">
+
+    <!-- Ana Konteyner -->
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-blue-600 mb-2 flex justify-center items-center gap-3">
+                <i class="fa-solid fa-microphone-lines"></i> DocuVoice
+            </h1>
+            <p class="text-slate-500">Belgelerinizi tarayıcınızda, sunucuya göndermeden dinleyin.</p>
+        </header>
+
+        <!-- Ana Kart -->
+        <div class="bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden">
+            
+            <!-- 1. Dosya Yükleme Alanı -->
+            <div class="p-8 border-b border-slate-100">
+                <div id="drop-zone" 
+                     class="border-2 border-dashed border-blue-200 rounded-xl p-10 text-center transition-all duration-300 hover:border-blue-500 hover:bg-blue-50 cursor-pointer group relative">
+                    
+                    <input type="file" id="file-input" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept=".pdf,.docx,.txt">
+                    
+                    <div class="space-y-3 pointer-events-none">
+                        <div class="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto transition-transform group-hover:scale-110">
+                            <i class="fa-solid fa-cloud-arrow-up text-2xl"></i>
+                        </div>
+                        <h3 class="text-lg font-semibold text-slate-700">Dosyayı buraya sürükleyin veya seçin</h3>
+                        <p class="text-sm text-slate-400">PDF, DOCX veya TXT (Maks. 10MB)</p>
+                    </div>
+                </div>
+                <!-- Dosya Bilgisi -->
+                <div id="file-info" class="hidden mt-4 bg-green-50 text-green-700 px-4 py-3 rounded-lg flex items-center justify-between text-sm animate-fade-in">
+                    <span class="flex items-center gap-2"><i class="fa-solid fa-check-circle"></i> <span id="filename-display">dosya.pdf</span></span>
+                    <button id="clear-file" class="text-green-800 hover:text-green-900 font-bold"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <!-- Yükleniyor Göstergesi -->
+                <div id="loading-indicator" class="hidden mt-4 text-center text-blue-600">
+                    <i class="fa-solid fa-spinner fa-spin mr-2"></i> Belge işleniyor...
+                </div>
+            </div>
+
+            <!-- 2. Kontrol Paneli -->
+            <div class="bg-slate-50 p-6 grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                
+                <!-- Ses Seçimi -->
+                <div>
+                    <label class="block text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Seslendirmen</label>
+                    <div class="relative">
+                        <select id="voice-select" class="w-full bg-white border border-slate-200 text-slate-700 py-3 px-4 pr-8 rounded-lg appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            <option value="">Yükleniyor...</option>
+                        </select>
+                        <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
+                            <i class="fa-solid fa-chevron-down text-xs"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Hız Kontrolü -->
+                <div>
+                    <label class="block text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">
+                        Okuma Hızı: <span id="rate-value" class="text-blue-600">1.0x</span>
+                    </label>
+                    <input type="range" id="rate-range" min="0.5" max="2" step="0.1" value="1" 
+                           class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer">
+                </div>
+            </div>
+
+            <!-- 3. Oynatma Butonları -->
+            <div class="p-6 flex flex-wrap justify-center gap-4 border-t border-slate-100">
+                <button id="btn-play" class="flex-1 md:flex-none bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:shadow-blue-500/30 transition-all flex items-center justify-center gap-2 min-w-[140px]">
+                    <i class="fa-solid fa-play"></i> Oku
+                </button>
+                <button id="btn-pause" class="flex-1 md:flex-none bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:shadow-amber-500/30 transition-all flex items-center justify-center gap-2 hidden">
+                    <i class="fa-solid fa-pause"></i> Duraklat
+                </button>
+                <button id="btn-stop" class="flex-1 md:flex-none bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:shadow-red-500/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i class="fa-solid fa-stop"></i> Durdur
+                </button>
+            </div>
+
+            <!-- 4. Metin Önizleme Alanı -->
+            <div class="p-6 border-t border-slate-100 bg-white">
+                <label class="block text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Metin İçeriği</label>
+                <textarea id="text-content" 
+                          class="w-full h-64 p-4 text-slate-600 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none leading-relaxed"
+                          placeholder="Yüklenen belgenin metni burada görünecektir..." readonly></textarea>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="text-center mt-8 text-slate-400 text-sm">
+            <p>&copy; 2026 DocuVoice. Sunucu gerektirmez, %100 Tarayıcı Tabanlı.</p>
+        </footer>
+    </div>
+
+    <!-- JAVASCRIPT MANTIĞI -->
+    <script>
+        // --- DEĞİŞKENLER ---
+        const synth = window.speechSynthesis;
+        let voices = [];
+        let currentUtterance = null;
+        let isPaused = false;
+
+        // DOM Elementleri
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
+        const filenameDisplay = document.getElementById('filename-display');
+        const clearFileBtn = document.getElementById('clear-file');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const textContent = document.getElementById('text-content');
+        
+        const voiceSelect = document.getElementById('voice-select');
+        const rateRange = document.getElementById('rate-range');
+        const rateValue = document.getElementById('rate-value');
+        
+        const btnPlay = document.getElementById('btn-play');
+        const btnPause = document.getElementById('btn-pause');
+        const btnStop = document.getElementById('btn-stop');
+
+        // --- SES AYARLARI ---
+
+        // Sesleri yükle ve dropdown'a ekle
+        function populateVoices() {
+            voices = synth.getVoices().sort((a, b) => {
+                const aname = a.name.toUpperCase();
+                const bname = b.name.toUpperCase();
+                if (aname < bname) return -1;
+                else if (aname == bname) return 0;
+                return +1;
+            });
+
+            voiceSelect.innerHTML = '';
+            
+            // Türkçe öncelikli sıralama yapabiliriz veya varsayılan bırakabiliriz.
+            // Burada hepsini listeliyoruz.
+            const defaultOption = document.createElement('option');
+            defaultOption.textContent = "Varsayılan Sistem Sesi";
+            defaultOption.value = "";
+            voiceSelect.appendChild(defaultOption);
+
+            voices.forEach((voice) => {
+                const option = document.createElement('option');
+                option.textContent = `${voice.name} (${voice.lang})`;
+                option.setAttribute('data-lang', voice.lang);
+                option.setAttribute('data-name', voice.name);
+                
+                // Türkçe ise seçili yapmaya çalış (Opsiyonel)
+                if(voice.lang.includes('tr-TR')) {
+                    // option.selected = true; // Otomatik Türkçe seçimi istenirse açılabilir
+                }
+                
+                voiceSelect.appendChild(option);
+            });
+        }
+
+        // Tarayıcı sesleri yüklediğinde tetikle
+        if (speechSynthesis.onvoiceschanged !== undefined) {
+            speechSynthesis.onvoiceschanged = populateVoices;
+        }
+        populateVoices();
+
+        // Hız Göstergesi Güncelleme
+        rateRange.addEventListener('input', () => {
+            rateValue.textContent = `${rateRange.value}x`;
+            // Eğer o an konuşuyorsa hızı anlık güncellemek için:
+            if (synth.speaking && !isPaused) {
+                // Not: Web Speech API anlık hız değişimini desteklemez, durdurup tekrar başlatmak gerekir.
+                // UX'i bozmamak için şimdilik sadece değeri güncelliyoruz, sonraki oynatmada aktif olacak.
+            }
+        });
+
+        // --- DOSYA İŞLEME MANTIĞI ---
+
+        // Sürükle Bırak Görsel Efektleri
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.add('border-blue-500', 'bg-blue-50');
+            });
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('border-blue-500', 'bg-blue-50');
+            });
+        });
+
+        // Dosya Seçimi (Input veya Drop)
+        fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+        dropZone.addEventListener('drop', (e) => handleFile(e.dataTransfer.files[0]));
+
+        function handleFile(file) {
+            if (!file) return;
+
+            // UI Güncelle
+            filenameDisplay.textContent = file.name;
+            dropZone.classList.add('hidden');
+            fileInfo.classList.remove('hidden');
+            loadingIndicator.classList.remove('hidden');
+            textContent.value = ""; // Önceki metni temizle
+            stopSpeech(); // Varsa okumayı durdur
+
+            const fileType = file.name.split('.').pop().toLowerCase();
+
+            if (fileType === 'pdf') {
+                readPdf(file);
+            } else if (fileType === 'docx') {
+                readDocx(file);
+            } else if (fileType === 'txt') {
+                readTxt(file);
+            } else {
+                alert("Desteklenmeyen dosya formatı. Lütfen PDF, DOCX veya TXT yükleyin.");
+                resetUI();
+            }
+        }
+
+        // 1. TXT Okuma
+        function readTxt(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                textContent.value = e.target.result;
+                loadingIndicator.classList.add('hidden');
+            };
+            reader.readAsText(file);
+        }
+
+        // 2. DOCX Okuma (Mammoth.js)
+        function readDocx(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                mammoth.extractRawText({ arrayBuffer: e.target.result })
+                    .then((result) => {
+                        textContent.value = result.value;
+                        loadingIndicator.classList.add('hidden');
+                    })
+                    .catch((err) => {
+                        console.error(err);
+                        alert("DOCX okuma hatası.");
+                        loadingIndicator.classList.add('hidden');
+                    });
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // 3. PDF Okuma (PDF.js)
+        async function readPdf(file) {
+            const reader = new FileReader();
+            reader.onload = async function() {
+                const typedarray = new Uint8Array(this.result);
+                try {
+                    const pdf = await pdfjsLib.getDocument(typedarray).promise;
+                    let fullText = "";
+                    
+                    // Sayfa sayfa metni çek
+                    for (let i = 1; i <= pdf.numPages; i++) {
+                        const page = await pdf.getPage(i);
+                        const textContentObj = await page.getTextContent();
+                        const pageText = textContentObj.items.map(item => item.str).join(' ');
+                        fullText += pageText + "\n\n";
+                    }
+
+                    textContent.value = fullText;
+                } catch (error) {
+                    console.error("PDF Hatası:", error);
+                    alert("PDF dosyası okunamadı. Dosya şifreli veya bozuk olabilir.");
+                } finally {
+                    loadingIndicator.classList.add('hidden');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // Dosya Temizleme
+        clearFileBtn.addEventListener('click', resetUI);
+
+        function resetUI() {
+            fileInput.value = "";
+            textContent.value = "";
+            dropZone.classList.remove('hidden');
+            fileInfo.classList.add('hidden');
+            loadingIndicator.classList.add('hidden');
+            stopSpeech();
+        }
+
+        // --- TTS (METİN OKUMA) KONTROLLERİ ---
+
+        btnPlay.addEventListener('click', () => {
+            if (isPaused) {
+                resumeSpeech();
+            } else {
+                speak();
+            }
+        });
+
+        btnPause.addEventListener('click', pauseSpeech);
+        btnStop.addEventListener('click', stopSpeech);
+
+        function speak() {
+            if (synth.speaking) {
+                console.error('Zaten konuşuyor.');
+                return;
+            }
+
+            const textToRead = textContent.value;
+            if (textToRead === '') {
+                alert("Okunacak metin bulunamadı. Lütfen bir dosya yükleyin.");
+                return;
+            }
+
+            // Yeni Okuma Nesnesi
+            currentUtterance = new SpeechSynthesisUtterance(textToRead);
+
+            // Seçilen Ses
+            const selectedOption = voiceSelect.selectedOptions[0];
+            const selectedVoiceName = selectedOption ? selectedOption.getAttribute('data-name') : null;
+            
+            if(selectedVoiceName) {
+                const voice = voices.find(v => v.name === selectedVoiceName);
+                if(voice) currentUtterance.voice = voice;
+            }
+
+            // Hız
+            currentUtterance.rate = parseFloat(rateRange.value);
+
+            // Olaylar
+            currentUtterance.onend = () => {
+                resetPlayButtons();
+            };
+            
+            currentUtterance.onerror = (e) => {
+                console.error('TTS Hatası:', e);
+                resetPlayButtons();
+            };
+
+            synth.speak(currentUtterance);
+            
+            // UI Güncelle
+            btnPlay.classList.add('hidden');
+            btnPause.classList.remove('hidden');
+            isPaused = false;
+        }
+
+        function pauseSpeech() {
+            if (synth.speaking && !synth.paused) {
+                synth.pause();
+                isPaused = true;
+                btnPause.classList.add('hidden');
+                btnPlay.innerHTML = '<i class="fa-solid fa-play"></i> Devam Et';
+                btnPlay.classList.remove('hidden');
+                // Buton rengini değiştirebiliriz
+                btnPlay.classList.remove('bg-blue-600');
+                btnPlay.classList.add('bg-green-600');
+            }
+        }
+
+        function resumeSpeech() {
+            if (synth.paused) {
+                synth.resume();
+                isPaused = false;
+                btnPlay.classList.add('hidden');
+                btnPause.classList.remove('hidden');
+            }
+        }
+
+        function stopSpeech() {
+            if (synth.speaking || isPaused) {
+                synth.cancel();
+            }
+            resetPlayButtons();
+        }
+
+        function resetPlayButtons() {
+            isPaused = false;
+            btnPlay.innerHTML = '<i class="fa-solid fa-play"></i> Oku';
+            btnPlay.classList.remove('hidden', 'bg-green-600');
+            btnPlay.classList.add('bg-blue-600');
+            btnPause.classList.add('hidden');
+        }
+        
+        // Sayfa kapatılırken konuşmayı durdur
+        window.onbeforeunload = function () {
+            synth.cancel();
+        };
+
+    </script>
+</body>
+</html>
