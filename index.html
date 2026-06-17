@@ -12,6 +12,7 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
     <style>
         ::-webkit-scrollbar { width: 8px; }
@@ -152,12 +153,18 @@
                 <div class="flex flex-wrap gap-3">
                     <span class="flex items-center gap-1.5"><span class="w-3 h-3 bg-blue-600 rounded-full"></span> Konuşmacı 1</span>
                     <span class="flex items-center gap-1.5"><span class="w-3 h-3 bg-red-600 rounded-full"></span> Konuşmacı 2</span>
-                    <span class="flex items-center gap-1.5"><span class="w-3 h-3 bg-green-600 rounded-full"></span> Konuşmacı 3</span>
-                    <span class="flex items-center gap-1.5"><span class="w-3 h-3 bg-purple-600 rounded-full"></span> Konuşmacı 4</span>
                 </div>
-                <button id="btn-clear-transcript" class="text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1">
-                    <i class="fa-solid fa-trash-can"></i> Temizle
-                </button>
+                <div class="flex items-center gap-4">
+                    <button id="btn-download-word" class="text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+                        <i class="fa-solid fa-file-word"></i> Word İndir
+                    </button>
+                    <button id="btn-download-pdf" class="text-red-600 hover:text-red-800 font-medium flex items-center gap-1">
+                        <i class="fa-solid fa-file-pdf"></i> PDF İndir
+                    </button>
+                    <button id="btn-clear-transcript" class="text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1 ml-2">
+                        <i class="fa-solid fa-trash-can"></i> Temizle
+                    </button>
+                </div>
             </div>
 
             <div class="p-8 bg-white">
@@ -375,7 +382,7 @@
             for (let i = 0; i < text.length; i++) {
                 hash = text.charCodeAt(i) + ((hash << 5) - hash);
             }
-            const speakerId = Math.abs(hash % 3) + 1; // Maksimum 4 farklı konuşmacıya dağıt (1, 2, 3, 4)
+            const speakerId = Math.abs(hash % 2) + 1; // Maksimum 2 farklı konuşmacıya dağıt (1, 2)
 
             // Eğer bu konuşmacı ID'si sisteme ilk defa giriyorsa hafızaya kaydet
             if (!speakerMap[speakerId]) {
@@ -468,6 +475,95 @@
             transcriptContainer.innerHTML = '<p class="text-slate-400 italic" id="transcript-placeholder">Dönüştürülen konuşmalar, renk kodlu konuşmacı analiziyle birlikte burada listelenecektir...</p>';
             speakerMap = {};
             speakerCount = 0;
+        });
+
+        // İndirme İşlemleri
+        document.getElementById('btn-download-word').addEventListener('click', () => {
+            const bubbles = document.querySelectorAll('#transcript-container > div.animate-fade-in');
+            if (bubbles.length === 0) return alert('İndirilecek konuşma bulunamadı.');
+
+            let htmlContent = `
+                <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+                <head><meta charset='utf-8'><title>Diyalog</title></head><body>
+            `;
+            
+            bubbles.forEach(bubble => {
+                const speakerSpan = bubble.querySelector('span[class^="speaker-"]');
+                const textSpan = bubble.querySelector('span.text-slate-700');
+                
+                if (speakerSpan && textSpan) {
+                    let color = '#000000';
+                    if (speakerSpan.classList.contains('speaker-1')) color = '#2563eb';
+                    if (speakerSpan.classList.contains('speaker-2')) color = '#dc2626';
+                    
+                    htmlContent += `
+                        <div style="margin-bottom: 15px; padding: 10px; border: 1px solid #ccc; border-radius: 5px;">
+                            <strong style="color: ${color}; display: block; margin-bottom: 5px; font-family: sans-serif;">${speakerSpan.innerText}</strong>
+                            <span style="color: #333; font-family: sans-serif;">${textSpan.innerText}</span>
+                        </div>
+                    `;
+                }
+            });
+            
+            htmlContent += `</body></html>`;
+            
+            const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'diyalog.doc';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+
+        document.getElementById('btn-download-pdf').addEventListener('click', () => {
+            const bubbles = document.querySelectorAll('#transcript-container > div.animate-fade-in');
+            if (bubbles.length === 0) return alert('İndirilecek konuşma bulunamadı.');
+
+            const container = document.createElement('div');
+            container.style.padding = '20px';
+            container.style.fontFamily = 'sans-serif';
+            
+            bubbles.forEach(bubble => {
+                const speakerSpan = bubble.querySelector('span[class^="speaker-"]');
+                const textSpan = bubble.querySelector('span.text-slate-700');
+                
+                if (speakerSpan && textSpan) {
+                    let color = '#000000';
+                    if (speakerSpan.classList.contains('speaker-1')) color = '#2563eb';
+                    if (speakerSpan.classList.contains('speaker-2')) color = '#dc2626';
+                    
+                    const div = document.createElement('div');
+                    div.style.marginBottom = '15px';
+                    div.style.padding = '10px';
+                    div.style.border = '1px solid #e2e8f0';
+                    div.style.borderRadius = '8px';
+                    
+                    const strong = document.createElement('strong');
+                    strong.style.color = color;
+                    strong.style.display = 'block';
+                    strong.style.marginBottom = '5px';
+                    strong.innerText = speakerSpan.innerText;
+                    
+                    const span = document.createElement('span');
+                    span.style.color = '#334155';
+                    span.innerText = textSpan.innerText;
+                    
+                    div.appendChild(strong);
+                    div.appendChild(span);
+                    container.appendChild(div);
+                }
+            });
+            
+            const opt = {
+                margin:       10,
+                filename:     'diyalog.pdf',
+                image:        { type: 'jpeg', quality: 0.98 },
+                html2canvas:  { scale: 2 },
+                jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+            };
+            html2pdf().set(opt).from(container).save();
         });
 
         window.onbeforeunload = function () {
