@@ -339,9 +339,118 @@
         let recognition = null;
         let isRecording = false;
 
-        // Hafızada Konuşmacı Takibi İçin Gerekli Değişkenler
-        let speakerMap = {}; 
+        // ---- SES TABANLI KONUŞMACI AYRIMI (Web Audio API) ----
+        // Metin hash'i yerine, sesin gerçek perde (pitch) ve enerji özelliklerinden
+        // konuşmacı profilleri çıkarılır ve her yeni cümle en yakın profile atanır.
+        let audioCtx = null;
+        let analyserNode = null;
+        let micStream = null;          // Canlı kayıt için ham mikrofon akışı
+        let mediaElementSource = null; // Yüklenen ses dosyası için kaynak düğümü
+        let analysisRAF = null;        // requestAnimationFrame referansı
+        let pitchBuffer = [];          // {t, pitch, rms} örnekleri (kayan pencere)
+        let lastResultTimestamp = null;
+        let audioAnalysisAvailable = false; // getUserMedia/analiz başarılıysa true
+
+        const MAX_SPEAKER_PROFILES = 4;   // speaker-1..speaker-4 CSS sınıflarıyla eşleşir
+        const PITCH_MATCH_THRESHOLD_HZ = 28; // Aynı kişi kabul edilecek maksimum perde farkı
+        let speakerProfiles = []; // [{id, avgPitch, sampleCount}]
+
+        // Hafızada Konuşmacı Takibi İçin Gerekli Değişkenler (görüntü/etiket eşlemesi)
+        let speakerMap = {};
         let speakerCount = 0;
+
+        // Basit otokorelasyon tabanlı temel frekans (pitch) tespiti.
+        // buf: Float32Array zaman-domeni örnekleri, sampleRate: AudioContext örnekleme hızı
+        function detectPitch(buf, sampleRate) {
+            const SIZE = buf.length;
+            let rms = 0;
+            for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+            rms = Math.sqrt(rms / SIZE);
+            if (rms < 0.012) return { pitch: -1, rms }; // Sessizlik / çok düşük enerji
+
+            // Sesin başı ve sonundaki gürültü kırpma (basit eşik tabanlı kırpma)
+            let start = 0, end = SIZE - 1;
+            const thresh = rms * 0.6;
+            while (start < SIZE && Math.abs(buf[start]) < thresh) start++;
+            while (end > start && Math.abs(buf[end]) < thresh) end--;
+            const trimmed = buf.subarray(start, end);
+            const n = trimmed.length;
+            if (n < 512) return { pitch: -1, rms };
+
+            const maxLag = Math.min(n - 1, Math.floor(sampleRate / 70));  // ~70 Hz alt sınır
+            const minLag = Math.floor(sampleRate / 400);                 // ~400 Hz üst sınır
+            let bestLag = -1, bestCorr = 0;
+
+            for (let lag = minLag; lag <= maxLag; lag++) {
+                let corr = 0;
+                for (let i = 0; i < n - lag; i++) corr += trimmed[i] * trimmed[i + lag];
+                if (corr > bestCorr) { bestCorr = corr; bestLag = lag; }
+            }
+
+            if (bestLag <= 0) return { pitch: -1, rms };
+            return { pitch: sampleRate / bestLag, rms };
+        }
+
+        // Analiz döngüsü: her animasyon karesinde ses verisini örnekler, pitch hesaplar
+        function startAnalysisLoop() {
+            const timeData = new Float32Array(analyserNode.fftSize);
+            const MAX_BUFFER_MS = 15000; // Bellek şişmesin diye son 15 saniyeyi tut
+
+            function tick() {
+                analyserNode.getFloatTimeDomainData(timeData);
+                const { pitch, rms } = detectPitch(timeData, audioCtx.sampleRate);
+                const now = performance.now();
+                pitchBuffer.push({ t: now, pitch, rms });
+                while (pitchBuffer.length && now - pitchBuffer[0].t > MAX_BUFFER_MS) pitchBuffer.shift();
+                analysisRAF = requestAnimationFrame(tick);
+            }
+            analysisRAF = requestAnimationFrame(tick);
+        }
+
+        function stopAnalysisLoop() {
+            if (analysisRAF) cancelAnimationFrame(analysisRAF);
+            analysisRAF = null;
+            pitchBuffer = [];
+            lastResultTimestamp = null;
+        }
+
+        // Belirli bir zaman aralığındaki (bir cümlenin söylendiği süre) örneklerden
+        // sesli (voiced) kısımların ortalama perdesini çıkarır.
+        function getAverageFeaturesForWindow(startT, endT) {
+            const samples = pitchBuffer.filter(s => s.t >= startT && s.t <= endT && s.pitch > 0);
+            if (samples.length === 0) return null;
+            const avgPitch = samples.reduce((sum, s) => sum + s.pitch, 0) / samples.length;
+            const avgRms = samples.reduce((sum, s) => sum + s.rms, 0) / samples.length;
+            return { avgPitch, avgRms, sampleCount: samples.length };
+        }
+
+        // Yeni bir cümlenin ortalama perdesini mevcut konuşmacı profilleriyle karşılaştırır,
+        // en yakın profile atar veya (eşleşme yoksa) yeni bir profil açar.
+        function assignSpeaker(avgPitch) {
+            if (avgPitch == null) return null; // Ses özelliği çıkarılamadıysa atama yapma
+
+            let closest = null, closestDist = Infinity;
+            for (const profile of speakerProfiles) {
+                const dist = Math.abs(profile.avgPitch - avgPitch);
+                if (dist < closestDist) { closestDist = dist; closest = profile; }
+            }
+
+            if (closest && closestDist <= PITCH_MATCH_THRESHOLD_HZ) {
+                // Aynı konuşmacı: profil ortalamasını kayan ortalama ile güncelle
+                closest.avgPitch = closest.avgPitch * 0.7 + avgPitch * 0.3;
+                closest.sampleCount++;
+                return closest.id;
+            }
+
+            if (speakerProfiles.length < MAX_SPEAKER_PROFILES) {
+                const newProfile = { id: speakerProfiles.length + 1, avgPitch, sampleCount: 1 };
+                speakerProfiles.push(newProfile);
+                return newProfile.id;
+            }
+
+            // Profil limiti dolduysa en yakın profile ata (yeni kişi yaratma)
+            return closest ? closest.id : 1;
+        }
 
         // Web Speech API Kontrolü ve İlklendirme
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -354,9 +463,14 @@
             recognition.onresult = (event) => {
                 const resultIndex = event.resultIndex;
                 const transcriptText = event.results[resultIndex][0].transcript.trim();
-                
+                const now = performance.now();
+                // Bu cümlenin söylendiği tahmini zaman penceresi: bir önceki sonuçtan şu ana kadar
+                const windowStart = lastResultTimestamp != null ? lastResultTimestamp : (now - 4000);
+                lastResultTimestamp = now;
+
                 if (transcriptText) {
-                    processSpeakerDiarization(transcriptText);
+                    const features = audioAnalysisAvailable ? getAverageFeaturesForWindow(windowStart, now) : null;
+                    processSpeakerDiarization(transcriptText, features);
                 }
             };
 
@@ -371,31 +485,35 @@
             };
         }
 
-        // Akıllı Konuşmacı Ayırt Etme (Diarization) Algoritması
-        function processSpeakerDiarization(text) {
+        // Ses Tabanlı Konuşmacı Ayırt Etme (Diarization)
+        // features: getAverageFeaturesForWindow() çıktısı (o cümlenin söylendiği andaki perde/enerji ortalaması)
+        function processSpeakerDiarization(text, features) {
             if(transcriptPlaceholder) transcriptPlaceholder.remove();
 
-            // Kural Tabanlı Vokal Profil Simülasyonu: 
-            // Saf statik sayfalarda ses frekansı okunamadığı için, cümle yapıları, uzunluk ve kelime kök frekanslarından 
-            // benzersiz bir matematiksel hash (kimlik) üretilerek gerçekçi bir diarizasyon simüle edilir.
-            let hash = 0;
-            for (let i = 0; i < text.length; i++) {
-                hash = text.charCodeAt(i) + ((hash << 5) - hash);
-            }
-            const speakerId = Math.abs(hash % 2) + 1; // Maksimum 2 farklı konuşmacıya dağıt (1, 2)
+            let speakerId;
+            let uncertain = false;
 
-            // Eğer bu konuşmacı ID'si sisteme ilk defa giriyorsa hafızaya kaydet
+            if (audioAnalysisAvailable && features && features.avgPitch) {
+                speakerId = assignSpeaker(features.avgPitch);
+            }
+            if (!speakerId) {
+                // Ses analizi kullanılamıyor veya bu cümlede net bir perde çıkarılamadı
+                // (fısıltı, çok kısa cümle, arka plan gürültüsü vb.) — konuşmacı belirsiz.
+                speakerId = speakerProfiles.length > 0 ? speakerProfiles[speakerProfiles.length - 1].id : 1;
+                uncertain = true;
+            }
+
             if (!speakerMap[speakerId]) {
                 speakerCount++;
                 speakerMap[speakerId] = `Konuşmacı ${speakerId}`;
+                addLegendEntry(speakerId);
             }
 
-            // Arayüze Ekleme (Aynı konuşmacı tekrar konuştuğunda rengini korur)
             const bubble = document.createElement('div');
             bubble.className = "p-3 bg-white border border-slate-100 rounded-xl shadow-sm animate-fade-in";
-            
+
             bubble.innerHTML = `
-                <span class="speaker-${speakerId} block text-xs uppercase mb-0.5">${speakerMap[speakerId]}</span>
+                <span class="speaker-${speakerId} block text-xs uppercase mb-0.5">${speakerMap[speakerId]}${uncertain ? ' <i class="fa-solid fa-circle-question text-slate-300" title="Konuşmacı net ayırt edilemedi"></i>' : ''}</span>
                 <span class="text-slate-700">${text}</span>
             `;
 
@@ -403,8 +521,38 @@
             transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
         }
 
+        // Konuşmacı 3/4 ilk kez ortaya çıktığında üstteki lejanda dinamik olarak ekler
+        function addLegendEntry(speakerId) {
+            const legendContainer = document.querySelector('.px-8.py-4.bg-blue-50\\/50 .flex.flex-wrap.gap-3');
+            if (!legendContainer || legendContainer.querySelector(`[data-legend-speaker="${speakerId}"]`)) return;
+            const colors = { 1: 'bg-blue-600', 2: 'bg-red-600', 3: 'bg-green-600', 4: 'bg-purple-600' };
+            const el = document.createElement('span');
+            el.className = 'flex items-center gap-1.5';
+            el.setAttribute('data-legend-speaker', speakerId);
+            el.innerHTML = `<span class="w-3 h-3 ${colors[speakerId] || 'bg-slate-400'} rounded-full"></span> Konuşmacı ${speakerId}`;
+            legendContainer.appendChild(el);
+        }
+
+        // Mikrofonu ayrıca Web Audio API'ye bağlayıp perde/enerji analizi için akış başlatır.
+        // SpeechRecognition kendi dahili mikrofon erişimini yönetir; bu, sadece analiz amaçlı ikinci bir akıştır.
+        async function setupMicAudioAnalysis() {
+            try {
+                micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(micStream);
+                analyserNode = audioCtx.createAnalyser();
+                analyserNode.fftSize = 2048;
+                source.connect(analyserNode);
+                audioAnalysisAvailable = true;
+                startAnalysisLoop();
+            } catch (err) {
+                console.warn("Mikrofon ses analizi başlatılamadı, konuşmacı ayrımı yapılamayacak:", err);
+                audioAnalysisAvailable = false;
+            }
+        }
+
         // Mikrofon Kayıt Kontrolü
-        btnRecordToggle.addEventListener('click', () => {
+        btnRecordToggle.addEventListener('click', async () => {
             if (!recognition) {
                 alert("Tarayıcınız bu özelliği desteklemiyor. Lütfen Chrome veya Edge kullanın.");
                 return;
@@ -412,6 +560,7 @@
 
             if (!isRecording) {
                 // Kaydı Başlat
+                await setupMicAudioAnalysis();
                 recognition.start();
                 isRecording = true;
                 btnRecordToggle.innerHTML = '<i class="fa-solid fa-stop-circle text-white animate-pulse"></i> Kaydı Durdur';
@@ -444,7 +593,22 @@
             // Sesi tarayıcıda arka planda çal ve STT motoruna dinlet
             const audioUrl = URL.createObjectURL(file);
             const audio = new Audio(audioUrl);
-            
+
+            // Dosya çalınırken de perde/enerji analizini bağla (konuşmacı ayrımı için)
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                mediaElementSource = audioCtx.createMediaElementSource(audio);
+                analyserNode = audioCtx.createAnalyser();
+                analyserNode.fftSize = 2048;
+                mediaElementSource.connect(analyserNode);
+                analyserNode.connect(audioCtx.destination); // Kullanıcı sesi duymaya devam etsin
+                audioAnalysisAvailable = true;
+                startAnalysisLoop();
+            } catch (err) {
+                console.warn("Dosya ses analizi başlatılamadı, konuşmacı ayrımı yapılamayacak:", err);
+                audioAnalysisAvailable = false;
+            }
+
             // Dönüştürme motorunu aç
             if(!isRecording) {
                 recognition.start();
@@ -468,6 +632,14 @@
             btnRecordToggle.innerHTML = '<i class="fa-solid fa-circle"></i> Kayda Başla';
             btnRecordToggle.classList.replace('bg-slate-800', 'bg-red-600');
             btnRecordToggle.classList.replace('hover:bg-slate-900', 'hover:bg-red-700');
+
+            // Ses analizi kaynaklarını serbest bırak
+            stopAnalysisLoop();
+            if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
+            if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+            analyserNode = null;
+            mediaElementSource = null;
+            audioAnalysisAvailable = false;
         }
 
         // Temizleme Butonu
@@ -475,6 +647,8 @@
             transcriptContainer.innerHTML = '<p class="text-slate-400 italic" id="transcript-placeholder">Dönüştürülen konuşmalar, renk kodlu konuşmacı analiziyle birlikte burada listelenecektir...</p>';
             speakerMap = {};
             speakerCount = 0;
+            speakerProfiles = [];
+            document.querySelectorAll('[data-legend-speaker="3"], [data-legend-speaker="4"]').forEach(el => el.remove());
         });
 
         // İndirme İşlemleri
@@ -495,6 +669,8 @@
                     let color = '#000000';
                     if (speakerSpan.classList.contains('speaker-1')) color = '#2563eb';
                     if (speakerSpan.classList.contains('speaker-2')) color = '#dc2626';
+                    if (speakerSpan.classList.contains('speaker-3')) color = '#16a34a';
+                    if (speakerSpan.classList.contains('speaker-4')) color = '#9333ea';
                     
                     htmlContent += `
                         <div style="margin-bottom: 15px; padding: 10px; border: 1px solid #ccc; border-radius: 5px;">
@@ -533,6 +709,8 @@
                     let color = '#000000';
                     if (speakerSpan.classList.contains('speaker-1')) color = '#2563eb';
                     if (speakerSpan.classList.contains('speaker-2')) color = '#dc2626';
+                    if (speakerSpan.classList.contains('speaker-3')) color = '#16a34a';
+                    if (speakerSpan.classList.contains('speaker-4')) color = '#9333ea';
                     
                     const div = document.createElement('div');
                     div.style.marginBottom = '15px';
